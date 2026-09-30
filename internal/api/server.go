@@ -123,6 +123,10 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing multipart boundary")
 		return
 	}
+	if !validMultipartBoundary(boundary) {
+		writeError(w, http.StatusBadRequest, "invalid multipart boundary")
+		return
+	}
 
 	// A chunked request with no length makes truncation indistinguishable
 	// from a complete body, so it is not accepted for uploads.
@@ -136,7 +140,8 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 	}
 
 	counter := &countingReader{r: r.Body}
-	limited := http.MaxBytesReader(w, io.NopCloser(counter), maxRequestBody)
+	strict := newStrictMultipartReader(counter, boundary)
+	limited := http.MaxBytesReader(w, io.NopCloser(strict), maxRequestBody)
 	mr := multipartNewReader(limited, boundary)
 
 	// ---- Part 1: exactly one "meta" field, JSON, first in order. ----

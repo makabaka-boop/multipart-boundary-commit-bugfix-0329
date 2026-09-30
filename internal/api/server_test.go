@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -114,6 +115,102 @@ func TestFaultHeaderIgnoredWhenDisabled(t *testing.T) {
 		t.Fatalf("fault header must be ignored in production, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestStrictMultipartTermination(t *testing.T) {
+	ts, store := newTestServer(t, false)
+	boundary := "testboundary"
+	content := []byte("complete file contents")
+	base := func() []byte {
+		return []byte("--" + boundary + "\r\n" +
+			"Content-Disposition: form-data; name=\"meta\"\r\n" +
+			"Content-Type: application/json\r\n\r\n" +
+			`{"request_id":"strict-boundary"}` + "\r\n" +
+			"--" + boundary + "\r\n" +
+			"Content-Disposition: form-data; name=\"file\"; filename=\"f\"\r\n" +
+			"Content-Type: application/octet-stream\r\n\r\n" +
+			string(content))
+	}
+
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "ordinary boundary instead of closing boundary",
+			body: append(base(), []byte("\r\n--"+boundary)...),
+		},
+		{
+			name: "ordinary boundary line with CRLF but no close marker",
+			body: append(base(), []byte("\r\n--"+boundary+"\r\n")...),
+		},
+		{
+			name: "closing boundary missing final CRLF",
+			body: append(base(), []byte("\r\n--"+boundary+"--")...),
+		},
+		{
+			name: "epilogue after closing boundary",
+			body: append(base(), []byte("\r\n--"+boundary+"--\r\nunexpected epilogue")...),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/uploads", bytes.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400", resp.StatusCode)
+			}
+			if _, err := store.Get(req.Context(), "strict-boundary"); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("malformed request stored record, lookup err=%v", err)
+			}
+		})
+	}
+}
+
+func TestStrictMultipartReplayRejectsMalformedTermination(t *testing.T) {
+	ts, _ := newTestServer(t, false)
+	body, boundary := buildBody(t, `{"request_id":"strict-replay"}`, "f", []byte("replayed bytes"))
+	original := append([]byte(nil), body.Bytes()...)
+	if resp := post(t, ts.URL+"/uploads", body, boundary, nil); resp.StatusCode != 201 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("initial upload status=%d body=%s", resp.StatusCode, raw)
+	} else {
+		resp.Body.Close()
+	}
+
+	raw := original
+	// Convert the legal close delimiter into an ordinary boundary, while the
+	// declared Content-Length still matches the bytes actually sent.
+	closing := []byte("\r\n--" + boundary + "--\r\n")
+	if !bytes.HasSuffix(raw, closing) {
+		t.Fatalf("test body did not end with expected closing delimiter: %q", raw[len(raw)-80:])
+	}
+	malformed := append([]byte(nil), raw[:len(raw)-len(closing)]...)
+	malformed = append(malformed, []byte("\r\n--"+boundary)...)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/uploads", bytes.NewReader(malformed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed replay status=%d, want 400", resp.StatusCode)
+	}
 }
 
 func TestDuplicateAndUnknownParts(t *testing.T) {
