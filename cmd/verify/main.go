@@ -428,6 +428,57 @@ func (v *verifier) phaseA() {
 		v.ok(status == 400, "empty file: expected 400, got %d", status)
 	})
 
+	v.run("multipart framing requires the final closing boundary", func() {
+		body, boundary := multipartBody([]formPart{
+			{name: "meta", contentType: "application/json", value: metaJSON(v.uniq("framing-open"), "")},
+			{name: "file", filename: "f", value: content},
+		}, nil)
+		validSuffix := []byte("\r\n--" + boundary + "--\r\n")
+		if !bytes.HasSuffix(body, validSuffix) {
+			v.must(false, "test body ended with %q, want %q", body[len(body)-20:], validSuffix)
+		}
+		open := append(body[:len(body)-len(validSuffix)], []byte("\r\n--"+boundary+"\r\n")...)
+		status, _, _ := doJSON("POST", v.baseURL+"/uploads", bytes.NewReader(open),
+			http.Header{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+		v.ok(status == 400, "ordinary boundary without closing marker: expected 400, got %d", status)
+
+		body, boundary = multipartBody([]formPart{
+			{name: "meta", contentType: "application/json", value: metaJSON(v.uniq("framing-tail"), "")},
+			{name: "file", filename: "f", value: content},
+		}, []byte("unexpected epilogue"))
+		status, _, _ = doJSON("POST", v.baseURL+"/uploads", bytes.NewReader(body),
+			http.Header{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+		v.ok(status == 400, "content after closing marker: expected 400, got %d", status)
+	})
+
+	v.run("damaged replay framing cannot return the stored upload", func() {
+		id := v.uniq("framing-replay")
+		body, boundary := multipartBody([]formPart{
+			{name: "meta", contentType: "application/json", value: metaJSON(id, "")},
+			{name: "file", filename: "f", value: content},
+		}, nil)
+		status, _, _ := doJSON("POST", v.baseURL+"/uploads", bytes.NewReader(body),
+			http.Header{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+		v.must(status == 201, "seed upload: expected 201, got %d", status)
+
+		validSuffix := []byte("\r\n--" + boundary + "--\r\n")
+		if !bytes.HasSuffix(body, validSuffix) {
+			v.must(false, "test body ended with %q, want %q", body[len(body)-20:], validSuffix)
+		}
+		open := append(body[:len(body)-len(validSuffix)], []byte("\r\n--"+boundary+"\r\n")...)
+		status, _, _ = doJSON("POST", v.baseURL+"/uploads", bytes.NewReader(open),
+			http.Header{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+		v.ok(status == 400, "open replay: expected 400, got %d", status)
+
+		body, boundary = multipartBody([]formPart{
+			{name: "meta", contentType: "application/json", value: metaJSON(id, "")},
+			{name: "file", filename: "f", value: content},
+		}, []byte("unexpected epilogue"))
+		status, _, _ = doJSON("POST", v.baseURL+"/uploads", bytes.NewReader(body),
+			http.Header{"Content-Type": {"multipart/form-data; boundary=" + boundary}})
+		v.ok(status == 400, "trailer replay: expected 400, got %d", status)
+	})
+
 	v.run("size limit: exactly 16 MiB succeeds, one byte more fails", func() {
 		const sixteenMiB = 16 << 20
 		status, rec := v.postStreaming(v.uniq("exact-16mib"), sixteenMiB, "application/octet-stream", nil)

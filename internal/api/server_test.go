@@ -116,6 +116,106 @@ func TestFaultHeaderIgnoredWhenDisabled(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestMalformedMultipartFramingRejected(t *testing.T) {
+	ts, _ := newTestServer(t, false)
+	content := []byte("framing content")
+
+	build := func(t *testing.T, id string, mutate func([]byte, string) []byte) ([]byte, string) {
+		body, boundary := buildBody(t, `{"request_id":"`+id+`"}`, "x.txt", content)
+		return mutate(body.Bytes(), boundary), boundary
+	}
+
+	missingClosingDelimiter := func(body []byte, boundary string) []byte {
+		validEnd := []byte("\r\n--" + boundary + "--\r\n")
+		if !bytes.HasSuffix(body, validEnd) {
+			t.Fatalf("test body did not end with the multipart closing boundary")
+		}
+		return append(body[:len(body)-len(validEnd)], []byte("\r\n--"+boundary+"\r\n")...)
+	}
+	trailingGarbage := func(body []byte, boundary string) []byte {
+		return append(body, []byte("unexpected epilogue")...)
+	}
+
+	check := func(t *testing.T, id string, mutate func([]byte, string) []byte) {
+		body, boundary := build(t, id, mutate)
+		resp := post(t, ts.URL+"/uploads", bytes.NewReader(body), boundary, nil)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Fatalf("malformed framing: got %d want 400", resp.StatusCode)
+		}
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/uploads/"+id, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		getResp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, getResp.Body)
+		getResp.Body.Close()
+		if getResp.StatusCode != 404 {
+			t.Fatalf("rejected upload became readable: got %d want 404", getResp.StatusCode)
+		}
+	}
+
+	t.Run("ordinary_boundary_without_closing_marker", func(t *testing.T) {
+		check(t, "frame-missing-end", missingClosingDelimiter)
+	})
+	t.Run("content_after_closing_marker", func(t *testing.T) {
+		check(t, "frame-trailing", trailingGarbage)
+	})
+}
+
+func TestMalformedReplayFramingRejected(t *testing.T) {
+	ts, _ := newTestServer(t, false)
+	content := []byte("replay framing content")
+	body, boundary := buildBody(t, `{"request_id":"frame-replay"}`, "x.txt", content)
+	resp := post(t, ts.URL+"/uploads", body, boundary, nil)
+	if resp.StatusCode != 201 {
+		t.Fatalf("initial upload: got %d want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	cases := map[string]func([]byte, string) []byte{
+		"ordinary_boundary_without_closing_marker": func(body []byte, boundary string) []byte {
+			validEnd := []byte("\r\n--" + boundary + "--\r\n")
+			if !bytes.HasSuffix(body, validEnd) {
+				t.Fatalf("test body did not end with the multipart closing boundary")
+			}
+			return append(body[:len(body)-len(validEnd)], []byte("\r\n--"+boundary+"\r\n")...)
+		},
+		"content_after_closing_marker": func(body []byte, _ string) []byte {
+			return append(body, []byte("unexpected epilogue")...)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			body, boundary = buildBody(t, `{"request_id":"frame-replay"}`, "other.txt", content)
+			malformed := mutate(body.Bytes(), boundary)
+			resp := post(t, ts.URL+"/uploads", bytes.NewReader(malformed), boundary, nil)
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 400 {
+				t.Fatalf("malformed replay: got %d want 400", resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestUploadLargerThanMultipartPeekBuffer(t *testing.T) {
+	ts, _ := newTestServer(t, false)
+	content := bytes.Repeat([]byte("A"), 5000)
+	body, boundary := buildBody(t, `{"request_id":"large-body"}`, "x.txt", content)
+	resp := post(t, ts.URL+"/uploads", body, boundary, nil)
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+	}
+}
+
 func TestDuplicateAndUnknownParts(t *testing.T) {
 	ts, _ := newTestServer(t, false)
 

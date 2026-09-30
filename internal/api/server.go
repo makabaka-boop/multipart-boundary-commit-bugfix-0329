@@ -137,7 +137,8 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 
 	counter := &countingReader{r: r.Body}
 	limited := http.MaxBytesReader(w, io.NopCloser(counter), maxRequestBody)
-	mr := multipartNewReader(limited, boundary)
+	framing := newFramingReader(limited, boundary)
+	mr := multipartNewReader(framing, boundary)
 
 	// ---- Part 1: exactly one "meta" field, JSON, first in order. ----
 	part, aerr := nextPart(mr)
@@ -209,7 +210,7 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "uploaded file is empty")
 			return
 		}
-		if aerr := framingComplete(mr, limited, counter, r.ContentLength); aerr != nil {
+		if aerr := framingComplete(mr, framing, counter, r.ContentLength); aerr != nil {
 			writeAPIError(w, aerr)
 			return
 		}
@@ -259,7 +260,7 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 	hashHex := staged.Hash()
 
 	// ---- A third part must not exist, and framing must be fully present. ----
-	if aerr := framingComplete(mr, limited, counter, r.ContentLength); aerr != nil {
+	if aerr := framingComplete(mr, framing, counter, r.ContentLength); aerr != nil {
 		abort()
 		writeAPIError(w, aerr)
 		return

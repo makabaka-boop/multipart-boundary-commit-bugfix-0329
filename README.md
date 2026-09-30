@@ -86,6 +86,7 @@ Content-Type: image/png
   * missing / duplicate / unknown multipart fields,
   * unknown / duplicate JSON keys, invalid JSON, trailing JSON data,
   * truncated body (fewer bytes than the declared `Content-Length`),
+  * missing multipart closing boundary or bytes after that boundary,
   * file larger than 16 MiB, empty file, wrong content type,
   * missing `Content-Length` (chunked uploads are rejected).
 
